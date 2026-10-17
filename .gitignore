@@ -1,0 +1,8 @@
+# Azure DevOps credentials and local workflow output
+.env
+.ado/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
