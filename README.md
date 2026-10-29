@@ -3,20 +3,23 @@
 This kit lets GitHub Copilot Chat take an Azure DevOps work item all the way to a green build, without leaving VS Code:
 
 ```text
-ADO work item ──► Spec Kit spec, plan and tasks ──► implementation ──► commit and push (Azure Repos)
-                                                                              │
-                         ┌────────────── fix, commit, push ◄── failed ◄──────┤
-                         ▼                                                    │
-                  watch Azure Pipelines build ──────────────────► succeeded ──► final report
+ADO work item → Spec Kit spec, plan and tasks → implementation → local checks
+                                                                    ↓
+                                              advisory security review + scoped fixes
+                                                                    ↓
+                                               commit and push → Azure Pipelines
+                                                                    ↓
+                    failure → fix, check, re-review, push       success → final report
 ```
 
-It has three parts:
+It has four parts:
 
 | Part | File | What it does |
 |---|---|---|
 | 📋 Work item skill | [`.github/skills/ado-work-item/`](.github/skills/ado-work-item/) | Fetches a work item from Azure Boards as Markdown |
 | 👀 Build monitor skill | [`.github/skills/ado-build-monitor/`](.github/skills/ado-build-monitor/) | Waits for the pipeline build of the pushed commit and reports why it failed |
-| 🤖 Orchestrator agent | [`.github/agents/ado-devflow.agent.md`](.github/agents/ado-devflow.agent.md) | **ADO DevFlow** in Copilot's agent picker. Runs the whole workflow with the two skills and Spec Kit. |
+| 🔎 Security review skill | [`.github/skills/ado-security-scan/`](.github/skills/ado-security-scan/) | Reviews repository behavior or cumulative changes for vulnerabilities, documents evidence, and supports scoped repairs |
+| 🤖 Orchestrator agent | [`.github/agents/ado-devflow.agent.md`](.github/agents/ado-devflow.agent.md) | **ADO DevFlow** in Copilot's agent picker. Runs the whole workflow with the three skills and Spec Kit. |
 
 A **skill** is a folder with a `SKILL.md` that tells Copilot when to use it and how, plus the script it runs. Copilot reads the instructions and runs the script in its terminal. A **custom agent** is a set of standing instructions you pick in the chat's agent dropdown.
 
@@ -104,6 +107,35 @@ The agent passes the work item Markdown to Spec Kit's skills in order:
 
 Before committing, the agent reads `azure-pipelines.yml` and runs the same lint and test commands locally.
 
+### Advisory security review: `ado-security-scan`
+
+Before implementation, ADO DevFlow saves a fixed Git baseline and records pre-existing edits. Before the first push and every CI repair push, it reviews the cumulative changes against that baseline, including staged, unstaged, untracked, and deleted files. Copilot maps trust boundaries, follows realistic attack paths, and validates potential vulnerabilities using source evidence and local tests when feasible.
+
+The agent attempts up to **two security repair-and-recheck cycles per push preparation** for confirmed vulnerabilities introduced or worsened by its changes. It documents unrelated findings and anything unresolved, then continues the normal build workflow. **Security findings and incomplete reviews do not block commits or pushes.** Autopilot includes the same review. The existing three-attempt CI retry limit is separate.
+
+You can also invoke the skill directly in Copilot Chat:
+
+```text
+/ado-security-scan review this repository
+/ado-security-scan review changes against origin/main
+```
+
+Replace `origin/main` with the actual intended baseline. Full-repository scans report and propose fixes by default; request fixes explicitly to apply them. Security-only requests do not require a work item ID.
+
+The helper uses only Python 3.9+ and Git to track scope, fingerprints, and reports. **It does not scan for vulnerabilities itself.** The skill uses Copilot reasoning, with no external scanners, new credentials, or additional security service. It does not promise exhaustive dependency-CVE or secret scanning, independent auditing, or Codex Security detection quality.
+
+Machine-readable state stays under ignored `.ado/security/`. Human-readable reports are written under `docs/` with names ending in `MM-DD-YY-HH-MM-SS.md` using the local timestamp. Reports record evidence, severity, validation, repairs, and coverage gaps and remain unstaged by default. New source or index changes make previous results stale; the agent refreshes the review or explicitly reports the gap. Only the helper's own generated outputs are excluded from review, not the rest of `docs/`.
+
+For helper commands, review JSON fields, and safety boundaries, see the [security skill](.github/skills/ado-security-scan/SKILL.md). To run its deterministic tests:
+
+```bash
+python -m unittest discover -s .github/skills/ado-security-scan/tests -v
+```
+
+Behavioral evaluation cases live alongside those tests. They exercise review judgment and need an actual Copilot session; passing helper tests alone does not establish detection quality.
+
+See the [research and validation notes](docs/ado-security-scan-research-and-validation-10-29-26-13-15-58.md) for the Codex Security comparison, helper interface, and behavioral evaluation procedure.
+
 ### 3. 📤 Commit and push
 
 The agent commits on the feature branch with `#1234` in the message, which links the commit to the work item in Azure Repos. Then it runs `git push -u origin HEAD`. It never pushes to the default branch.
@@ -161,7 +193,8 @@ On a failed build, the agent:
 1. finds the first real error in the report,
 2. reproduces it locally with the same command the pipeline ran,
 3. fixes it,
-4. commits `fix(ci): …`, pushes, and runs the build monitor again.
+4. repeats the advisory security review against the saved baseline, with bounded scoped repairs,
+5. commits `fix(ci): …`, pushes, and runs the build monitor again.
 
 🛑 It stops and asks you instead of changing code when:
 
@@ -173,7 +206,7 @@ On a failed build, the agent:
 
 ## 🖐️ Running the scripts by hand
 
-Both scripts work without Copilot, which is useful for checking your setup. Run them from the repository root:
+The ADO scripts work without Copilot, which is useful for checking your setup. Run them from the repository root:
 
 ```bash
 python .github/skills/ado-work-item/get_work_item.py 1234
